@@ -1,0 +1,215 @@
+---
+title: "treeRchitecture_examples"
+output: html_notebook
+---
+
+This notebook gives examples of operations on cylinder model of trees (QSMs)
+It relies on the QSM format from Pasi Raumonen's TreeQSM
+It is essentially a few summaries and plots from Allie Shenkin's treestruct 
++ a few functions from treeRchitecture_functions.R. I'm adding to this.
+
+This section just sets up the packages
+```{r}
+#devtools::install_github("ashenkin/treestruct",force=TRUE)
+#detach("package:treestruct", unload = TRUE)
+#devtools::install_github("vqv/ggbiplot")
+
+library(treestruct)
+library(rmatio)
+library(testit)
+library(R.matlab)
+library(visNetwork)
+library(tidyverse)
+library(magrittr)
+#library(corrmorant)
+library(ggbiplot)
+#library(plot3D)
+```
+
+Load in the data and convert to treestructs following ashenkin github example
+```{r}
+
+qsm_path="C:/Users/tobyd/Documents/Data/TLS_Data/QSMs/test_qsm/"
+
+my_trees = import_treestructs_from_dir(qsm_path = qsm_path, qsmver = "UCL", recursive = T)
+my_qsms = TreeStructs(dataset = "my_trees", treestructs = my_trees)
+my_qsms = run_all(my_qsms)  # run all architectural analyses
+my_qsms = parse_id(my_qsms, treetag_regex = ".*(?=\\.mat)", nobranchcode = T)  # add tree tag to df
+
+# Add plot and tree tag to the cyl data frame inside the list
+# This isn't very tidy at the moment, I need the functions to reference this data from outside the list, but it's difficult to work with bind_rows in that case
+for (i in seq(1,length(my_qsms$treestructs$treestruct))){
+  #my_qsms$treestructs$treestruct[[i]]$tag =my_qsms$treestructs$tag[i]
+  my_qsms$treestructs$treestruct[[i]]$tag=as.character(i)
+  my_qsms$treestructs$treestruct[[i]]$plot=my_qsms$treestructs$plot[i]
+  my_qsms$treestructs$treestruct[[i]]$dbh=my_qsms$treestructs$dbh[i]
+  my_qsms$treestructs$treestruct[[i]]$treeheight=my_qsms$treestructs$treeheight[i]
+}
+
+my_treestructs = getTreestructs(my_qsms)  # tree level summaries of current architectural variables
+
+# You can safely ignore the warnings below
+```
+
+
+Add 'treeRchitecture_functions'
+```{r}
+# path to your R folder with these functions (also used to save figs)
+treeRchitecture="C:/Users/tobyd/OneDrive - University Of Cambridge/R/treeRchitecture/"
+source(paste0(treeRchitecture,'treeRchitecture_functions.R'))
+
+ncolors=1000 # this should be higher than your number of trees.
+random_colors = rainbow(26, s=.6, v=.9)[sample(1:26,ncolors,replace=TRUE)]
+```
+
+
+Calculate verticlaly binned summaries of the tree structure
+I'm using the treestructs (rather than cyl_summs) so there are more cylinders per bin
+It should be generalisable to cyl_summs once all the same variables are included there
+
+```{r}
+
+my_qsms$treestructs$treestruct %<>% lapply(add_centres_and_height_bin,bin_size=5) 
+# bin_size = vertical size of the bins in m
+
+tree1=my_qsms$treestructs$treestruct[[1]]
+# get summaries per height bin
+rad_per_height_bin=bind_rows(my_qsms$treestructs$treestruct) %>% 
+  dplyr::group_by(plot,tag,height_of_bin_m) %>% 
+  dplyr::summarize(max_radius=max(rad),median_radius=median(rad)) # Maximum radius 
+
+
+summary(rad_per_height_bin$plot)
+
+# plot it out
+ggplot(rad_per_height_bin,aes(max_radius,height_of_bin_m,color=as.factor(tag)))+
+  geom_line()+geom_point()+facet_wrap(~plot)+theme(legend.position = "none")+scale_color_manual(values=random_colors)
+ggsave(filename=paste0(treeRchitecture,'Example_fig_max_radius_per_height_bin.png'),width=6,height=4)
+
+```
+
+
+Calculate branching angles
+```{r}
+
+my_qsms$treestructs$treestruct %<>% lapply(add_angles) # add angles to all trees in the list
+# this produces some NaN's where there is no parent cylinder, don't worry about that
+
+# Plot the distributions of branching angles for the trees
+bind_rows(my_qsms$treestructs$treestruct) %>%
+  dplyr::filter(order_in_branch==1) %>%  # use only cyls after the bifurcation points to get the branching angles only.
+  ggplot(aes(x=angle_from_parent_z,color=as.factor(tag)))+stat_density(alpha = 1,size = 0.5,geom="line", position = "identity")+facet_wrap(~plot)+theme(legend.position = "none")+scale_color_manual(values=random_colors)
+
+ggsave(filename=paste0(treeRchitecture,'Example_fig_branching_angle_distribution_per_tree.png'),width=6,height=3)
+
+
+branching_angle_per_height_bin=dplyr::bind_rows(my_qsms$treestructs$treestruct) %>% 
+  dplyr::group_by(plot,tag,height_of_bin_m) %>% 
+  dplyr::filter(order_in_branch==1) %>% # select only the cyls after branching point to get branching angles
+  dplyr::summarize(mean_angle_z=mean(angle_from_parent_z,na.rm=TRUE),
+            mean_angle_3d=mean(angle_from_parent_3d,na.rm=TRUE))  
+
+
+ggplot(branching_angle_per_height_bin,aes(mean_angle_z,height_of_bin_m,color=as.factor(tag)))+geom_line()+geom_point()+facet_wrap(~plot)+theme(legend.position = "none")+scale_color_manual(values=random_colors)
+# there is no obvious patter of branching angle with height
+
+ggsave(filename=paste0(treeRchitecture,'Example_fig_mean_branching_angle_per_height_bin.png'),width=6,height=3)
+
+
+
+```
+
+
+```
+Gravitational stability - Euler maximum height of a beam / centres of mass
+
+```{r}
+# Add wood density and modulus of rupture columns to the data frames
+for (i in seq(1,length(my_qsms$treestructs$treestruct))){
+  my_qsms$treestructs$treestruct[[i]]$wood_density_kgm3=800
+  my_qsms$treestructs$treestruct[[i]]$modulus_of_rupture_Pa=50e6
+  my_qsms$treestructs$treestruct[[i]]$modulus_of_elasticity_Pa=10.5e9
+}
+
+a=my_qsms$treestructs$treestruct %>% lapply(gravitational_stability) %>% bind_rows()
+
+
+stability_results=my_qsms$treestructs$treestruct %>% lapply(gravitational_stability) %>% bind_rows()
+
+my_treestructs %<>% bind_cols(stability_results)
+
+ggplot(my_treestructs,aes(crown_offset,gravitational_safety_margin,color=as.factor(file)))+geom_point()+facet_wrap(~plot)+theme(legend.position = "none")+scale_color_manual(values=random_colors)
+
+
+
+```
+
+
+Self weight - calculate the moment and risk factor due to self weight for each cylinder
+
+```{r}
+# The function 'selfweight_moment_per_tree' assumes wood density and modulus of rupture are defined, 
+# if not it will through warning messages 'uninitialised column' and default to the values for Quercus robur
+
+# Add wood density and modulus of rupture columns to the data frames
+for (i in seq(1,length(my_qsms$treestructs$treestruct))){
+  my_qsms$treestructs$treestruct[[i]]$wood_density_kgm3=800
+  my_qsms$treestructs$treestruct[[i]]$modulus_of_rupture_Pa=50e6
+  my_qsms$treestructs$treestruct[[i]]$modulus_of_elasticity_Pa=10.5e9
+}
+
+my_qsms$treestructs$treestruct %<>% lapply(selfweight_moment_per_tree)
+# note that this approach ignores reaction wood and assumes the branches are cylindrical
+
+# Plot for a single tree
+tree=my_qsms$treestructs$treestruct[[1]]
+ggplot(tree,aes(rad,risk_factor_selfweight))+geom_point()
+
+# Summarize risk factors per branching order
+risk_factor_per_branch_order=dplyr::bind_rows(my_qsms$treestructs$treestruct) %>% 
+  dplyr::group_by(plot,tag,branch_order) %>%
+  dplyr::summarize(mean_self_weight_risk_factor=mean(risk_factor_selfweight,na.rm=TRUE),
+                   max_self_weight_risk_factor=max(risk_factor_selfweight,na.rm=TRUE)) 
+
+ggplot(risk_factor_per_branch_order %>% filter(branch_order!=0),aes(branch_order,mean_self_weight_risk_factor,color=tag))+geom_point()+geom_line()+facet_wrap(~plot)+theme(legend.position = "none")+scale_color_manual(values=random_colors)
+
+ggsave(filename=paste0(treeRchitecture,'Example_fig_risk_factor_per_branch_order.png'),width=6,height=4)
+
+# This approach could be extended to calculate the risk factor due to a wind load / animal load
+
+```
+
+
+Tree level averages and PCA
+```{r}
+branching_angle_per_tree=dplyr::bind_rows(my_qsms$treestructs$treestruct) %>% 
+  dplyr::group_by(plot,tag) %>% 
+  dplyr::filter(order_in_branch==1) %>% # select only the cyls after branching point to get branching angles
+  dplyr::summarize(mean_angle_z=mean(angle_from_parent_z,na.rm=TRUE),
+            mean_angle_3d=mean(angle_from_parent_3d,na.rm=TRUE)) 
+
+
+my_treestructs$mean_branching_angle_3d=branching_angle_per_tree$mean_angle_3d
+my_treestructs$mean_branching_angle_z=branching_angle_per_tree$mean_angle_z
+my_treestructs %<>% bind_cols(stability_results)
+
+dt_pca=my_treestructs %>% ungroup() %>% dplyr::select(treeheight,dbh,mean_branching_angle_3d,mean_branching_angle_z,surface_area_tot,vol_tot,pathlen_frac,crown_vol_convhull,crown_proj_area_convhull,tree_offset,crown_offset,stem_offset,crown_stem_mass_ratio,gravitational_safety_margin)
+
+treestructs.pca = prcomp(dt_pca, center = TRUE,scale. = TRUE)
+
+ggbiplot(treestructs.pca,groups=my_treestructs$plot) # but this has overlapping names which is annoying
+
+# alternatively
+autoplot(treestructs.pca, data=my_treestructs, colour="plot", loadings = TRUE, loadings.colour = 'brown',
+         loadings.label.colour='brown', loadings.label = TRUE, loadings.label.size = 4,
+         loadings.label.repel=TRUE)+stat_ellipse(type = "norm", 
+         level=0.68,aes(color=plot))
+        
+ggsave(filename=paste0(treeRchitecture,'Example_fig_PCA.png'),width=8,height=6)
+        
+
+```
+
+
+
+
